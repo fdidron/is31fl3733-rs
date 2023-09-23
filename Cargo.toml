@@ -1,0 +1,14 @@
+[package]
+name = "is31fl3733-rs"
+version = "0.1.0"
+edition = "2021"
+authors = ["Pini Grigio"]
+categories = ["embedded", "no-std"]
+description = "A platform agnostic driver to interface with the IS31FL3733 (16x12 LED Matrix Driver) written in Rust"
+license = "unlicense"
+repository = "https://github.com/0xa10/is31fl3733-rs"
+readme = "README.md"
+
+
+[dependencies]
+embedded-hal = "1.0.0-rc.1"
