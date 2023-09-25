@@ -119,6 +119,7 @@ impl<BUS: I2c> IS31FL3733<BUS> {
             return Err(IS31FL3733Error::DeviceError);
         }
         self.set_configuration(CONFIGURATION_SOFTWARE_SHUTDOWN_DISABLE)?;
+        self.set_page(self.state.page)?;
         Ok(())
     }
 
@@ -156,16 +157,71 @@ impl<BUS: I2c> IS31FL3733<BUS> {
         Ok(())
     }
 
-    pub fn set_pwm(&mut self, led: usize, pwms: &[u8]) -> Result<(), IS31FL3733Error> {
-        if led + pwms.len() > 192 {
-            return Err(IS31FL3733Error::StateError);
-        }
+    pub fn set_pwm(&mut self, pwms: &[u8; 192]) -> Result<(), IS31FL3733Error> {
+        // Non diffing implementation
+        let mut buffer: [u8; 193] = [0; 193];
+        buffer[0] = PWM_REGISTER_BASE.register;
+        buffer[1..].copy_from_slice(pwms);
 
-        set_page(self, PWM_REGISTER_BASE.page)?;
+        self.set_page(PWM_REGISTER_BASE.page)?;
         self.i2c
-            .write(self.address, &[PWM_REGISTER_BASE.register + led as u8])
+            .write(self.address, &buffer)
             .map_err(|e| IS31FL3733Error::I2CError(e.kind()))?;
 
+        self.state.leds_pwm.copy_from_slice(pwms);
+        Ok(())
+    }
+
+    pub fn set_leds(&mut self, leds: &[u8; 0x18]) -> Result<(), IS31FL3733Error> {
+        // Non diffing implementation
+        let mut buffer: [u8; 25] = [0; 25];
+        buffer[0] = LED_CONTROL_REGISTER_BASE.register;
+        buffer[1..].copy_from_slice(leds);
+
+        self.set_page(LED_CONTROL_REGISTER_BASE.page)?;
+        self.i2c
+            .write(self.address, &buffer)
+            .map_err(|e| IS31FL3733Error::I2CError(e.kind()))?;
+
+        self.state.leds_control.copy_from_slice(leds);
+
+        Ok(())
+    }
+
+    pub fn turn_on_led(&mut self, led: u8) -> Result<(), IS31FL3733Error> {
+        let led_index = led / 8;
+        let led_bit = led % 8;
+        self.state.leds_control[led_index as usize] |= 1 << led_bit;
+        self.write_paged(
+            LED_CONTROL_REGISTER_BASE.page,
+            LED_CONTROL_REGISTER_BASE.register + led_index,
+            self.state.leds_control[led_index as usize],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn turn_off_led(&mut self, led: u8) -> Result<(), IS31FL3733Error> {
+        let led_index = led / 8;
+        let led_bit = led % 8;
+        self.state.leds_control[led_index as usize] &= !(1 << led_bit);
+        self.write_paged(
+            LED_CONTROL_REGISTER_BASE.page,
+            LED_CONTROL_REGISTER_BASE.register + led_index,
+            self.state.leds_control[led_index as usize],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn set_led_pwm(&mut self, led: u8, pwm: u8) -> Result<(), IS31FL3733Error> {
+        self.state.leds_pwm[led as usize] = pwm;
+        self.write_paged(
+            PWM_REGISTER_BASE.page,
+            PWM_REGISTER_BASE.register + led,
+            pwm,
+        )?;
+        Ok(())
     }
 
     pub fn apply(&mut self, new_state: &IS31FL3733State) -> Result<(), IS31FL3733Error> {
@@ -293,7 +349,7 @@ mod tests {
         assert_eq!(bus.into_write_slice(), EXPECTED_WRITE_DATA);
     }
 
-    #[test] 
+    #[test]
     fn configuration_test() {
         const EXPECTED_WRITE_DATA: &[u8] = &[0xfe, 0xc5, 0xfd, 0x03, 0x00, 0xaa, 0x00, 0xab];
 
@@ -312,12 +368,51 @@ mod tests {
         const EXPECTED_WRITE_DATA: &[u8] = &[0xfe, 0xc5, 0xfd, 0x03, 0x01, 0xaa, 0x01, 0xab];
 
         let mut bus = FakeI2cBus::<32, 32>::new();
-    
+
         let mut is31fl3733 = IS31FL3733::new(&mut bus, 0x60);
 
         is31fl3733.set_global_current_control(0xaa).unwrap();
         is31fl3733.set_global_current_control(0xaa).unwrap();
         is31fl3733.set_global_current_control(0xab).unwrap();
+
+        assert_eq!(bus.into_write_slice(), EXPECTED_WRITE_DATA);
+    }
+
+    #[test]
+    fn led_control_test() {
+        const EXPECTED_WRITE_DATA: &[u8] = &[
+            0xfe, 0xc5, 0xfd, 0x02, 0xfe, 0xc5, 0xfd, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0xfe, 0x00, 0xff, 0x0a, 0xdf, 0x0a, 0xff,
+        ];
+
+        let mut bus = FakeI2cBus::<64, 32>::new();
+
+        let mut is31fl3733 = IS31FL3733::new(&mut bus, 0x60);
+
+        is31fl3733.set_page(2);
+        is31fl3733.set_leds(&[0xff; 0x18]).unwrap();
+        is31fl3733.turn_off_led(0).unwrap();
+        is31fl3733.turn_on_led(0).unwrap();
+
+        is31fl3733.turn_off_led(85).unwrap();
+        is31fl3733.turn_on_led(85).unwrap();
+
+        assert_eq!(bus.into_write_slice(), EXPECTED_WRITE_DATA);
+    }
+
+    #[test]
+    fn led_pwm_test() {
+        const EXPECTED_WRITE_DATA: &[u8] = &[
+            0xfe, 0xc5, 0xfd, 0x01, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xbf, 0xaa
+        ];
+
+        let mut bus = FakeI2cBus::<{192*2}, 32>::new();
+
+        let mut is31fl3733 = IS31FL3733::new(&mut bus, 0x60);
+
+        is31fl3733.set_pwm(&[0xff; 192]).unwrap();
+        is31fl3733.set_led_pwm(191, 0xaa).unwrap();
 
         assert_eq!(bus.into_write_slice(), EXPECTED_WRITE_DATA);
     }
