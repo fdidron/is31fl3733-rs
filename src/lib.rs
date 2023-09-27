@@ -3,6 +3,7 @@
 use embedded_hal::i2c::I2c;
 use embedded_hal::i2c::{Error, ErrorKind, ErrorType};
 
+
 #[derive(Debug)]
 pub enum IS31FL3733Error {
     I2CError(ErrorKind),
@@ -93,6 +94,7 @@ pub struct IS31FL3733State {
 }
 
 impl Default for IS31FL3733State {
+    // This reflect the presumed default state after a reset
     fn default() -> Self {
         Self {
             page: 0,
@@ -120,6 +122,7 @@ impl<BUS: I2c> IS31FL3733<BUS> {
         }
         self.set_configuration(CONFIGURATION_SOFTWARE_SHUTDOWN_DISABLE)?;
         self.set_page(self.state.page)?;
+        
         Ok(())
     }
 
@@ -152,14 +155,20 @@ impl<BUS: I2c> IS31FL3733<BUS> {
         if page != self.state.page {
             self.unlock()?;
             self.write_register(COMMAND_REGISTER, page)?;
+
             self.state.page = page;
         }
         Ok(())
     }
 
+    pub fn apply_pwm(&mut self, new_pwms: &[u8; 192]) -> Result<(), IS31FL3733Error> {
+        Ok(())
+
+    }
+
     pub fn set_pwm(&mut self, pwms: &[u8; 192]) -> Result<(), IS31FL3733Error> {
-        // Non diffing implementation
         let mut buffer: [u8; 193] = [0; 193];
+
         buffer[0] = PWM_REGISTER_BASE.register;
         buffer[1..].copy_from_slice(pwms);
 
@@ -169,6 +178,50 @@ impl<BUS: I2c> IS31FL3733<BUS> {
             .map_err(|e| IS31FL3733Error::I2CError(e.kind()))?;
 
         self.state.leds_pwm.copy_from_slice(pwms);
+
+        Ok(())
+    }
+
+    pub fn apply_leds(&mut self, leds: &[u8; 0x18]) -> Result<(), IS31FL3733Error> {
+        let mut buffer: heapless::Vec<u8, 25> = heapless::Vec::new();
+        let mut cursor: u8 = LED_CONTROL_REGISTER_BASE.register;
+
+        buffer.push(cursor).unwrap();
+
+        self.set_page(LED_CONTROL_REGISTER_BASE.page)?;
+
+        for i in 0..0x18 {
+            let old = self.state.leds_control[i];
+            let new = leds[i];
+
+            if old == new {
+                if buffer.len() > 1 {
+                    // Flush buffer
+                    buffer[0] = cursor;
+                    self.i2c
+                        .write(self.address, &buffer.as_slice())
+                        .map_err(|e| IS31FL3733Error::I2CError(e.kind()))?;
+
+                    cursor = cursor.checked_add(buffer.len() as u8).ok_or(IS31FL3733Error::StateError)?;
+                    buffer.clear();
+                    buffer.push(cursor)
+                        .map_err(|_| IS31FL3733Error::StateError)?;
+                } else {
+                    cursor = cursor.checked_add(1).ok_or(IS31FL3733Error::StateError)?;
+                }
+            } else {
+                buffer.push(new).map_err(|_| IS31FL3733Error::StateError)?;
+            }
+        }
+
+        // If leftovers in buffer
+        if buffer.len() > 1 {
+            buffer[0] = cursor;
+            self.i2c
+                .write(self.address, &buffer.as_slice())
+                .map_err(|e| IS31FL3733Error::I2CError(e.kind()))?;
+        }
+
         Ok(())
     }
 
@@ -221,19 +274,6 @@ impl<BUS: I2c> IS31FL3733<BUS> {
             PWM_REGISTER_BASE.register + led,
             pwm,
         )?;
-        Ok(())
-    }
-
-    pub fn apply(&mut self, new_state: &IS31FL3733State) -> Result<(), IS31FL3733Error> {
-        // The purpose of this function is to bring the current state to the new state
-        // with minimum commands, according to the delta of the two.
-
-        self.set_configuration(new_state.configuration_register)?;
-        self.set_global_current_control(new_state.global_current_control)?;
-
-        // Then check and update leds PWM
-        // To do this optimally and take advantage of the auto-increment, we need to go over all
-
         Ok(())
     }
 
@@ -375,6 +415,96 @@ mod tests {
         is31fl3733.set_global_current_control(0xaa).unwrap();
         is31fl3733.set_global_current_control(0xab).unwrap();
 
+        assert_eq!(bus.into_write_slice(), EXPECTED_WRITE_DATA);
+    }
+
+    #[test]
+    fn led_full_apply_test() {
+        const EXPECTED_WRITE_DATA: &[u8] = &[
+            0x00,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 
+            0x00,
+            0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 
+        ];
+
+        let mut bus = FakeI2cBus::<94, 32>::new();
+
+        let mut is31fl3733 = IS31FL3733::new(&mut bus, 0x60);
+
+
+        is31fl3733.set_leds(&[0xff; 0x18]).unwrap();
+        is31fl3733.apply_leds(&[0xaa; 0x18]).unwrap();
+        assert_eq!(bus.into_write_slice(), EXPECTED_WRITE_DATA);
+    }
+
+    #[test]
+    fn led_striped_apply_test() {
+        const EXPECTED_WRITE_DATA: &[u8] = &[
+            0x00,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 
+            0x01,
+            0xaa, 0xaa, 0xaa,
+            0x08,
+            0xaa,
+            0x13,
+            0xaa, 0xaa, 0xaa, 0xaa, 0xaa,
+        ];
+
+        let mut bus = FakeI2cBus::<94, 32>::new();
+
+        let mut is31fl3733 = IS31FL3733::new(&mut bus, 0x60);
+
+        let mut leds_state = [0xff; 0x18];
+
+        is31fl3733.set_leds(&leds_state).unwrap();
+        leds_state[1] = 0xaa;
+        leds_state[2] = 0xaa;
+        leds_state[3] = 0xaa;
+        leds_state[8] = 0xaa;
+        leds_state[19..].copy_from_slice(&[0xaa; 5]);
+        is31fl3733.apply_leds(&leds_state).unwrap();
+        assert_eq!(bus.into_write_slice(), EXPECTED_WRITE_DATA);
+    }
+    #[test]
+    fn led_start_apply_test() {
+        const EXPECTED_WRITE_DATA: &[u8] = &[
+            0x00,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 
+            0x00,
+            0xaa, 0xaa,
+        ];
+
+        let mut bus = FakeI2cBus::<94, 32>::new();
+
+        let mut is31fl3733 = IS31FL3733::new(&mut bus, 0x60);
+
+        let mut leds_state = [0xff; 0x18];
+
+        is31fl3733.set_leds(&leds_state).unwrap();
+        leds_state[..2].copy_from_slice(&[0xaa; 2]);
+        is31fl3733.apply_leds(&leds_state).unwrap();
+        assert_eq!(bus.into_write_slice(), EXPECTED_WRITE_DATA);
+    }
+
+    #[test]
+    fn led_middle_apply_test() {
+        const EXPECTED_WRITE_DATA: &[u8] = &[
+            0x00,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 
+            0x08, 0xaa, 0xaa
+
+        ];
+
+        let mut bus = FakeI2cBus::<94, 32>::new();
+
+        let mut is31fl3733 = IS31FL3733::new(&mut bus, 0x60);
+
+        let mut leds_state = [0xff; 0x18];
+
+        is31fl3733.set_leds(&leds_state).unwrap();
+        is31fl3733.apply_leds(&leds_state).unwrap();
+        leds_state[8..10].copy_from_slice(&[0xaa; 2]);
+        is31fl3733.apply_leds(&leds_state).unwrap();
         assert_eq!(bus.into_write_slice(), EXPECTED_WRITE_DATA);
     }
 
