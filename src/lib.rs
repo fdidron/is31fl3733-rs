@@ -1,6 +1,5 @@
 #![no_std]
 
-use embedded_hal::i2c::I2c;
 use embedded_hal::i2c::{Error, ErrorKind, ErrorType};
 
 #[derive(Debug)]
