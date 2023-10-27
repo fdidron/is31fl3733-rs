@@ -1,5 +1,5 @@
 #![no_std]
-
+use diff_in_place::DiffInPlace;
 use embedded_hal::i2c::{Error, ErrorKind, ErrorType};
 
 #[derive(Debug)]
@@ -19,11 +19,11 @@ impl Error for IS31FL3733Error {
     }
 }
 
-impl<BUS: I2c> ErrorType for IS31FL3733<BUS> {
+impl<BUS: embedded_hal::i2c::I2c> ErrorType for IS31FL3733<BUS> {
     type Error = IS31FL3733Error;
 }
 
-pub struct IS31FL3733<BUS: I2c> {
+pub struct IS31FL3733<BUS: embedded_hal::i2c::I2c> {
     i2c: BUS,
     state: State,
     address: u8,
@@ -81,14 +81,14 @@ const CONFIGURATION_SYNC_HIGH_IMPEDANCE_ALTERNATE: u8 = 0b0110_0000;
 const CONFIGURATION_SYNC_MASTER: u8 = 0b0010_0000;
 const CONFIGURATION_SYNC_SLAVE: u8 = 0b0100_0000;
 const CONFIGURATION_OSD_ENABLE: u8 = 0b0000_0100;
-const CONFIGURATION_AUTO_BREATH_MODE_ENABLE: u8 = 0b0000_010;
-const CONFIGURATION_SOFTWARE_SHUTDOWN_DISABLE: u8 = 0b0000_001;
+const CONFIGURATION_AUTO_BREATH_MODE_ENABLE: u8 = 0b0000_0010;
+const CONFIGURATION_SOFTWARE_SHUTDOWN_DISABLE: u8 = 0b0000_0001;
 
 pub struct State {
     page: u8,
     configuration_register: u8,
-    leds_control: [u8; 0x18],
-    leds_pwm: [u8; 192],
+    leds: [u8; 24],
+    brightness: [u8; 192],
     global_current_control: u8,
 }
 
@@ -98,15 +98,15 @@ impl Default for State {
         Self {
             page: 0,
             configuration_register: 0,
-            leds_control: [0; 0x18],
-            leds_pwm: [0; 192],
+            leds: [0; 24],
+            brightness: [0; 192],
             global_current_control: 0,
         }
     }
 }
 
-const LED_COUNT: usize = 192;
-impl<BUS: I2c> IS31FL3733<BUS> {
+const TOTAL_LED_COUNT: usize = 192;
+impl<BUS: embedded_hal::i2c::I2c> IS31FL3733<BUS> {
     pub fn new(i2c: BUS, address: u8) -> Self {
         Self {
             i2c,
@@ -115,7 +115,7 @@ impl<BUS: I2c> IS31FL3733<BUS> {
         }
     }
 
-    pub fn init(&mut self) -> Result<(), IS31FL3733Error> {
+    pub fn initialize(&mut self) -> Result<(), IS31FL3733Error> {
         self.set_page(RESET_REGISTER.page)?;
         let reset_result = self.read_register(RESET_REGISTER.register)?;
 
@@ -161,111 +161,43 @@ impl<BUS: I2c> IS31FL3733<BUS> {
         Ok(())
     }
 
-    pub fn set_led_brightness(&mut self, led: u8, brightness: u8) -> Result<(), IS31FL3733Error> {
-        let old = self.state.leds_pwm[led as usize];
-
-        if old != brightness {
-            self.set_page(PWM_REGISTER_BASE.page)?;
-            self.write_register(PWM_REGISTER_BASE.register + led, brightness)?;
-
-            self.state.leds_pwm[led as usize] = brightness;
-        }
-
-        Ok(())
-    }
-
-    pub fn led_on(&mut self, led: u8) -> Result<(), IS31FL3733Error> {
-        self.set_led(led, true)
-    }
-
-    pub fn led_off(&mut self, led: u8) -> Result<(), IS31FL3733Error> {
-        self.set_led(led, false)
-    }
-
-    pub fn set_led(&mut self, led: u8, on: bool) -> Result<(), IS31FL3733Error> {
-        let led_cell = self.state.leds_control[led as usize / 8];
-        let led_bit = 1 << (led % 8);
-
-        let new_led_cell = if on {
-            led_cell | led_bit
-        } else {
-            led_cell & !led_bit
-        };
-
-        if new_led_cell != led_cell {
-            self.set_page(LED_CONTROL_REGISTER_BASE.page)?;
-            self.write_register(
-                LED_CONTROL_REGISTER_BASE.register + led as u8 / 8,
-                new_led_cell,
-            )?;
-
-            self.state.leds_control[led as usize / 8] = new_led_cell;
-        }
-
-        Ok(())
-    }
-
-    pub fn set_leds(&mut self, leds: &[u8; LED_COUNT / 8]) -> Result<(), IS31FL3733Error> {
-        // TODO - figure out how to avoid this copy
-        let old = self.state.leds_control;
-
+    pub fn set_leds(&mut self, leds: &[u8; TOTAL_LED_COUNT / 8]) -> Result<(), IS31FL3733Error> {
         self.set_page(LED_CONTROL_REGISTER_BASE.page)?;
-        self.diff_write(&old, leds)?;
 
-        self.state.leds_control.copy_from_slice(leds);
+        // TODO - is is possible to avoid this copy?
+        // perhaps with lifetime annotations?
+        self.state.leds.clone().try_diff_in_place(
+            leds,
+            |idx, data| -> Result<(), IS31FL3733Error> {
+                self.write_buffer::<{ (TOTAL_LED_COUNT / 8) + 1 }>(
+                    LED_CONTROL_REGISTER_BASE.register + idx as u8,
+                    data,
+                )?;
+                Ok(())
+            },
+        )?;
 
         Ok(())
     }
 
-    pub fn set_pwm(&mut self, pwm: &[u8; LED_COUNT]) -> Result<(), IS31FL3733Error> {
-        // TODO - figure out how to avoid this copy
-        let old = self.state.leds_pwm;
-
+    pub fn set_brightness(
+        &mut self,
+        brightness: &[u8; TOTAL_LED_COUNT],
+    ) -> Result<(), IS31FL3733Error> {
         self.set_page(PWM_REGISTER_BASE.page)?;
-        self.diff_write(&old, pwm)?;
 
-        self.state.leds_pwm.copy_from_slice(pwm);
-
-        Ok(())
-    }
-
-    fn diff_write(&mut self, old: &[u8], new: &[u8]) -> Result<(), IS31FL3733Error> {
-        let mut buffer: heapless::Vec<u8, LED_COUNT> = heapless::Vec::new();
-        let mut cursor: u8 = 0;
-
-        if old.len() != new.len() {
-            return Err(IS31FL3733Error::StateError);
-        }
-
-        // The strategy here is to try and find "runs" in the buffer which
-        // require changes, and write only those.
-        // We are constrained by the maximum size of our buffer.
-        for index in 0..old.len() {
-            let old_value = old[index];
-            let new_value = new[index];
-
-            if old_value == new_value {
-                // If the values match, we have either finished a run and need
-                // to flush the buffered data.
-                if buffer.len() > 0 {
-                    // Flush buffer
-                    self.write_buffer::<{ LED_COUNT + 1 }>(cursor, buffer.as_slice())?;
-                    buffer.clear();
-                    // Advance cursor to current position
-                    cursor = index as u8;
-                }
-                cursor = cursor.checked_add(1).ok_or(IS31FL3733Error::StateError)?;
-            } else {
-                buffer
-                    .push(new_value)
-                    .map_err(|_| IS31FL3733Error::StateError)?;
-            }
-        }
-
-        // If any remainder is left in the buffer, flush it
-        if buffer.len() > 0 {
-            self.write_buffer::<{ LED_COUNT + 1 }>(cursor, buffer.as_slice())?;
-        }
+        // TODO - is is possible to avoid this copy?
+        // perhaps with lifetime annotations?
+        self.state.brightness.clone().try_diff_in_place(
+            brightness,
+            |idx, data| -> Result<(), IS31FL3733Error> {
+                self.write_buffer::<{ (TOTAL_LED_COUNT) + 1 }>(
+                    PWM_REGISTER_BASE.register + idx as u8,
+                    data,
+                )?;
+                Ok(())
+            },
+        )?;
 
         Ok(())
     }
@@ -275,21 +207,20 @@ impl<BUS: I2c> IS31FL3733<BUS> {
         address: u8,
         data: &[u8],
     ) -> Result<(), IS31FL3733Error> {
-        // N expresses the maximum write size
-        if data.len() > N - 1 {
-            return Err(IS31FL3733Error::OutOfSpaceError);
-        }
-
         let mut buffer: heapless::Vec<u8, N> = heapless::Vec::new();
+
+        // Push address
         buffer
             .push(address)
             .map_err(|_| IS31FL3733Error::OutOfSpaceError)?;
+
+        // and then data
         buffer
             .extend_from_slice(data)
             .map_err(|_| IS31FL3733Error::OutOfSpaceError)?;
 
         self.i2c
-            .write(self.address, &buffer.as_slice())
+            .write(self.address, buffer.as_slice())
             .map_err(|e| IS31FL3733Error::I2CError(e.kind()))?;
 
         Ok(())
@@ -350,11 +281,11 @@ mod tests {
             }
         }
 
-        pub fn into_write_slice(&self) -> &[u8] {
+        pub fn write_data_as_ref(&self) -> &[u8] {
             self.write_data.as_slice()
         }
 
-        pub fn into_read_slice(&self) -> &[u8] {
+        pub fn read_data_as_ref(&self) -> &[u8] {
             self.read_data.as_slice()
         }
     }
@@ -362,7 +293,7 @@ mod tests {
     impl<const N: usize, const M: usize> embedded_hal::i2c::I2c for FakeI2cBus<N, M> {
         fn transaction(
             &mut self,
-            address: embedded_hal::i2c::SevenBitAddress,
+            _address: embedded_hal::i2c::SevenBitAddress,
             operations: &mut [embedded_hal::i2c::Operation],
         ) -> Result<(), Self::Error> {
             for operation in operations {
@@ -392,9 +323,9 @@ mod tests {
         let mut bus = FakeI2cBus::<32, 32>::new_with_read_data(&EXPECTED_READ_DATA);
 
         let mut is31fl3733 = IS31FL3733::new(&mut bus, 0x60);
-        is31fl3733.init().unwrap();
+        is31fl3733.initialize().unwrap();
 
-        assert_eq!(bus.into_write_slice(), EXPECTED_WRITE_DATA);
+        assert_eq!(bus.write_data_as_ref(), EXPECTED_WRITE_DATA);
     }
 
     #[test]
@@ -408,7 +339,7 @@ mod tests {
         is31fl3733.set_configuration(0xaa).unwrap();
         is31fl3733.set_configuration(0xab).unwrap();
 
-        assert_eq!(bus.into_write_slice(), EXPECTED_WRITE_DATA);
+        assert_eq!(bus.write_data_as_ref(), EXPECTED_WRITE_DATA);
     }
 
     #[test]
@@ -423,139 +354,39 @@ mod tests {
         is31fl3733.set_global_current_control(0xaa).unwrap();
         is31fl3733.set_global_current_control(0xab).unwrap();
 
-        assert_eq!(bus.into_write_slice(), EXPECTED_WRITE_DATA);
+        assert_eq!(bus.write_data_as_ref(), EXPECTED_WRITE_DATA);
     }
 
     #[test]
-    fn led_full_apply_test() {
+    fn state_update_test() {
+        #[rustfmt::skip]
         const EXPECTED_WRITE_DATA: &[u8] = &[
-            0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0xaa, 0xaa,
-            0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa,
-            0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa,
+            254, 197,  // Write unlock
+            253, 1,   // Set page to 1
+            20, 255, 255, // set brightness leds 20 to 21 to 0xff
+            188, 240, 240, 240, 240, // set brightness leds 188 to 192 to 0xff
+            254, 197, // Write unlock
+            253, 0,  // Set page to 0
+            10, 255, 255, // set leds 10 to 11 to 0xff
         ];
 
-        let mut bus = FakeI2cBus::<94, 32>::new();
+        let mut bus = FakeI2cBus::<32, 32>::new();
 
         let mut is31fl3733 = IS31FL3733::new(&mut bus, 0x60);
 
-        is31fl3733.set_leds(&[0xff; 0x18]).unwrap();
-        is31fl3733.set_leds(&[0xaa; 0x18]).unwrap();
-        assert_eq!(bus.into_write_slice(), EXPECTED_WRITE_DATA);
-    }
+        let mut new_brightness = [0; 192];
 
-    #[test]
-    fn led_striped_apply_test() {
-        const EXPECTED_WRITE_DATA: &[u8] = &[
-            0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01, 0xaa, 0xaa,
-            0xaa, 0x08, 0xaa, 0x13, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa,
-        ];
+        new_brightness[20..22].fill(0xff);
+        new_brightness[188..].fill(0xf0);
 
-        let mut bus = FakeI2cBus::<94, 32>::new();
+        is31fl3733.set_brightness(&new_brightness).unwrap();
 
-        let mut is31fl3733 = IS31FL3733::new(&mut bus, 0x60);
+        let mut new_leds = [0; 24];
 
-        let mut leds_state = [0xff; 0x18];
+        new_leds[10..12].fill(0xff);
 
-        is31fl3733.set_leds(&leds_state).unwrap();
-        leds_state[1] = 0xaa;
-        leds_state[2] = 0xaa;
-        leds_state[3] = 0xaa;
-        leds_state[8] = 0xaa;
-        leds_state[19..].copy_from_slice(&[0xaa; 5]);
-        is31fl3733.set_leds(&leds_state).unwrap();
-        assert_eq!(bus.into_write_slice(), EXPECTED_WRITE_DATA);
-    }
-    #[test]
-    fn led_start_apply_test() {
-        const EXPECTED_WRITE_DATA: &[u8] = &[
-            0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0xaa, 0xaa,
-        ];
+        is31fl3733.set_leds(&new_leds).unwrap();
 
-        let mut bus = FakeI2cBus::<94, 32>::new();
-
-        let mut is31fl3733 = IS31FL3733::new(&mut bus, 0x60);
-
-        let mut leds_state = [0xff; 0x18];
-
-        is31fl3733.set_leds(&leds_state).unwrap();
-        leds_state[..2].copy_from_slice(&[0xaa; 2]);
-        is31fl3733.set_leds(&leds_state).unwrap();
-        assert_eq!(bus.into_write_slice(), EXPECTED_WRITE_DATA);
-    }
-
-    #[test]
-    fn led_middle_apply_test() {
-        const EXPECTED_WRITE_DATA: &[u8] = &[
-            0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x08, 0xaa, 0xaa,
-        ];
-
-        let mut bus = FakeI2cBus::<94, 32>::new();
-
-        let mut is31fl3733 = IS31FL3733::new(&mut bus, 0x60);
-
-        let mut leds_state = [0xff; 0x18];
-
-        is31fl3733.set_leds(&leds_state).unwrap();
-        is31fl3733.set_leds(&leds_state).unwrap();
-        leds_state[8..10].copy_from_slice(&[0xaa; 2]);
-        is31fl3733.set_leds(&leds_state).unwrap();
-        assert_eq!(bus.into_write_slice(), EXPECTED_WRITE_DATA);
-    }
-
-    #[test]
-    fn led_control_test() {
-        const EXPECTED_WRITE_DATA: &[u8] = &[
-            0xfe, 0xc5, 0xfd, 0x02, 0xfe, 0xc5, 0xfd, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0xfe, 0x00, 0xff, 0x0a, 0xdf, 0x0a, 0xff,
-        ];
-
-        let mut bus = FakeI2cBus::<64, 32>::new();
-
-        let mut is31fl3733 = IS31FL3733::new(&mut bus, 0x60);
-
-        is31fl3733.set_page(2).unwrap();
-        is31fl3733.set_leds(&[0xff; 0x18]).unwrap();
-        is31fl3733.led_off(0).unwrap();
-        is31fl3733.led_on(0).unwrap();
-
-        is31fl3733.led_off(85).unwrap();
-        is31fl3733.led_on(85).unwrap();
-
-        assert_eq!(bus.into_write_slice(), EXPECTED_WRITE_DATA);
-    }
-
-    #[test]
-    fn led_pwm_test() {
-        const EXPECTED_WRITE_DATA: &[u8] = &[
-            0xfe, 0xc5, 0xfd, 0x01, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-            0xff, 0xbf, 0xaa,
-        ];
-
-        let mut bus = FakeI2cBus::<{ 192 * 2 }, 32>::new();
-
-        let mut is31fl3733 = IS31FL3733::new(&mut bus, 0x60);
-
-        is31fl3733.set_pwm(&[0xff; 192]).unwrap();
-        is31fl3733.set_led_brightness(191, 0xaa).unwrap();
-
-        assert_eq!(bus.into_write_slice(), EXPECTED_WRITE_DATA);
+        assert_eq!(bus.write_data_as_ref(), EXPECTED_WRITE_DATA);
     }
 }
