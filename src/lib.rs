@@ -1,4 +1,5 @@
 #![no_std]
+use core::cell::RefCell;
 use diff_in_place::DiffInPlace;
 use embedded_hal::i2c::{Error, ErrorKind, ErrorType};
 
@@ -24,7 +25,7 @@ impl<BUS: embedded_hal::i2c::I2c> ErrorType for IS31FL3733<BUS> {
 }
 
 pub struct IS31FL3733<BUS: embedded_hal::i2c::I2c> {
-    i2c: BUS,
+    i2c: RefCell<BUS>,
     state: State,
     address: u8,
 }
@@ -109,7 +110,7 @@ const TOTAL_LED_COUNT: usize = 192;
 impl<BUS: embedded_hal::i2c::I2c> IS31FL3733<BUS> {
     pub fn new(i2c: BUS, address: u8) -> Self {
         Self {
-            i2c,
+            i2c: RefCell::new(i2c),
             address,
             state: State::default(),
         }
@@ -164,18 +165,15 @@ impl<BUS: embedded_hal::i2c::I2c> IS31FL3733<BUS> {
     pub fn set_leds(&mut self, leds: &[u8; TOTAL_LED_COUNT / 8]) -> Result<(), IS31FL3733Error> {
         self.set_page(LED_CONTROL_REGISTER_BASE.page)?;
 
-        // TODO - is is possible to avoid this copy?
-        // perhaps with lifetime annotations?
-        self.state.leds.clone().try_diff_in_place(
-            leds,
-            |idx, data| -> Result<(), IS31FL3733Error> {
+        self.state
+            .leds
+            .try_diff_in_place(leds, |idx, data| -> Result<(), IS31FL3733Error> {
                 self.write_buffer::<{ (TOTAL_LED_COUNT / 8) + 1 }>(
                     LED_CONTROL_REGISTER_BASE.register + idx as u8,
                     data,
                 )?;
                 Ok(())
-            },
-        )?;
+            })?;
 
         Ok(())
     }
@@ -188,7 +186,7 @@ impl<BUS: embedded_hal::i2c::I2c> IS31FL3733<BUS> {
 
         // TODO - is is possible to avoid this copy?
         // perhaps with lifetime annotations?
-        self.state.brightness.clone().try_diff_in_place(
+        self.state.brightness.try_diff_in_place(
             brightness,
             |idx, data| -> Result<(), IS31FL3733Error> {
                 self.write_buffer::<{ (TOTAL_LED_COUNT) + 1 }>(
@@ -203,7 +201,7 @@ impl<BUS: embedded_hal::i2c::I2c> IS31FL3733<BUS> {
     }
 
     pub fn write_buffer<const N: usize>(
-        &mut self,
+        &self,
         address: u8,
         data: &[u8],
     ) -> Result<(), IS31FL3733Error> {
@@ -220,6 +218,7 @@ impl<BUS: embedded_hal::i2c::I2c> IS31FL3733<BUS> {
             .map_err(|_| IS31FL3733Error::OutOfSpaceError)?;
 
         self.i2c
+            .borrow_mut()
             .write(self.address, buffer.as_slice())
             .map_err(|e| IS31FL3733Error::I2CError(e.kind()))?;
 
@@ -228,6 +227,7 @@ impl<BUS: embedded_hal::i2c::I2c> IS31FL3733<BUS> {
 
     pub fn write_register(&mut self, address: u8, value: u8) -> Result<(), IS31FL3733Error> {
         self.i2c
+            .borrow_mut()
             .write(self.address, &[address, value])
             .map_err(|e| IS31FL3733Error::I2CError(e.kind()))?;
         Ok(())
@@ -237,6 +237,7 @@ impl<BUS: embedded_hal::i2c::I2c> IS31FL3733<BUS> {
         let mut buffer = [0; 1];
 
         self.i2c
+            .borrow_mut()
             .write_read(self.address, &[address], &mut buffer)
             .map_err(|e| IS31FL3733Error::I2CError(e.kind()))?;
         Ok(buffer[0])
