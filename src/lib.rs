@@ -3,6 +3,9 @@ use core::cell::RefCell;
 use diff_in_place::DiffInPlace;
 use embedded_hal::i2c::{Error, ErrorKind, ErrorType};
 
+mod config;
+use config::*;
+
 #[derive(Debug)]
 pub enum IS31FL3733Error {
     I2CError(ErrorKind),
@@ -30,62 +33,6 @@ pub struct IS31FL3733<BUS: embedded_hal::i2c::I2c> {
     address: u8,
 }
 
-const COMMAND_REGISTER: u8 = 0xfd;
-const COMMAND_WRITE_LOCK_REGISTER: u8 = 0xfe;
-const COMMAND_WRITE_UNLOCK: u8 = 0xc5;
-const INTERRUPT_MASK_REGISTER: u8 = 0xf0;
-const INTERRUPT_STATUS_REGISTER: u8 = 0xf1;
-
-struct PagedRegister {
-    page: u8,
-    register: u8,
-}
-
-const LED_CONTROL_REGISTER_BASE: PagedRegister = PagedRegister {
-    page: 0x00,
-    register: 0x00,
-};
-const LED_OPEN_REGISTER_BASE: PagedRegister = PagedRegister {
-    page: 0x00,
-    register: 0x18,
-};
-const LED_SHORT_REGISTER_BASE: PagedRegister = PagedRegister {
-    page: 0x00,
-    register: 0x30,
-};
-
-const PWM_REGISTER_BASE: PagedRegister = PagedRegister {
-    page: 0x01,
-    register: 0x00,
-};
-
-const AUTO_BREATH_MODE_REGISTER_BASE: PagedRegister = PagedRegister {
-    page: 0x02,
-    register: 0x00,
-};
-
-const CONFIGURATION_REGISTER: PagedRegister = PagedRegister {
-    page: 0x03,
-    register: 0x00,
-};
-const GCC_REGISTER: PagedRegister = PagedRegister {
-    page: 0x03,
-    register: 0x01,
-};
-const RESET_REGISTER: PagedRegister = PagedRegister {
-    page: 0x03,
-    register: 0x11,
-};
-
-const CONFIGURATION_SYNC_HIGH_IMPEDANCE: u8 = 0b0000_0000;
-const CONFIGURATION_SYNC_HIGH_IMPEDANCE_ALTERNATE: u8 = 0b0110_0000;
-const CONFIGURATION_SYNC_MASTER: u8 = 0b0010_0000;
-const CONFIGURATION_SYNC_SLAVE: u8 = 0b0100_0000;
-const CONFIGURATION_OSD_ENABLE: u8 = 0b0000_0100;
-const CONFIGURATION_AUTO_BREATH_MODE_ENABLE: u8 = 0b0000_0010;
-const CONFIGURATION_SOFTWARE_SHUTDOWN_DISABLE: u8 = 0b0000_0001;
-
-const TOTAL_LED_COUNT: usize = 192;
 struct State {
     page: u8,
     configuration_register: u8,
@@ -306,51 +253,12 @@ impl<BUS: embedded_hal::i2c::I2c> IS31FL3733<BUS> {
 }
 
 #[cfg(test)]
+mod test_utils;
+
+#[cfg(test)]
 mod tests {
     use super::*;
-
-    #[derive(Debug)]
-    enum FakeI2cError {
-        Error,
-    }
-    impl Error for FakeI2cError {
-        fn kind(&self) -> ErrorKind {
-            ErrorKind::Other
-        }
-    }
-
-    struct FakeI2cBus<const N: usize, const M: usize> {
-        pub write_data: heapless::Vec<u8, N>,
-        pub read_data: heapless::Vec<u8, M>,
-    }
-
-    impl<const N: usize, const M: usize> ErrorType for FakeI2cBus<N, M> {
-        type Error = FakeI2cError;
-    }
-
-    impl<const N: usize, const M: usize> FakeI2cBus<N, M> {
-        pub fn new() -> Self {
-            Self {
-                write_data: heapless::Vec::new(),
-                read_data: heapless::Vec::new(),
-            }
-        }
-
-        pub fn new_with_read_data(read_data: &[u8]) -> Self {
-            Self {
-                write_data: heapless::Vec::new(),
-                read_data: heapless::Vec::from_slice(read_data).unwrap(),
-            }
-        }
-
-        pub fn write_data_as_ref(&self) -> &[u8] {
-            self.write_data.as_slice()
-        }
-
-        pub fn read_data_as_ref(&self) -> &[u8] {
-            self.read_data.as_slice()
-        }
-    }
+    use test_utils::*;
 
     impl<const N: usize, const M: usize> embedded_hal::i2c::I2c for FakeI2cBus<N, M> {
         fn transaction(
