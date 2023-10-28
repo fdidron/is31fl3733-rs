@@ -85,11 +85,12 @@ const CONFIGURATION_OSD_ENABLE: u8 = 0b0000_0100;
 const CONFIGURATION_AUTO_BREATH_MODE_ENABLE: u8 = 0b0000_0010;
 const CONFIGURATION_SOFTWARE_SHUTDOWN_DISABLE: u8 = 0b0000_0001;
 
+const TOTAL_LED_COUNT: usize = 192;
 struct State {
     page: u8,
     configuration_register: u8,
-    leds: [u8; 24],
-    brightness: [u8; 192],
+    leds: [u8; TOTAL_LED_COUNT / 8],
+    brightness: [u8; TOTAL_LED_COUNT],
     global_current_control: u8,
 }
 
@@ -106,7 +107,6 @@ impl Default for State {
     }
 }
 
-const TOTAL_LED_COUNT: usize = 192;
 impl<BUS: embedded_hal::i2c::I2c> IS31FL3733<BUS> {
     /// Create a new IS31FL3733 driver
     /// # Arguments
