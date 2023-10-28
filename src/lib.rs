@@ -85,7 +85,7 @@ const CONFIGURATION_OSD_ENABLE: u8 = 0b0000_0100;
 const CONFIGURATION_AUTO_BREATH_MODE_ENABLE: u8 = 0b0000_0010;
 const CONFIGURATION_SOFTWARE_SHUTDOWN_DISABLE: u8 = 0b0000_0001;
 
-pub struct State {
+struct State {
     page: u8,
     configuration_register: u8,
     leds: [u8; 24],
@@ -108,6 +108,13 @@ impl Default for State {
 
 const TOTAL_LED_COUNT: usize = 192;
 impl<BUS: embedded_hal::i2c::I2c> IS31FL3733<BUS> {
+    /// Create a new IS31FL3733 driver
+    /// # Arguments
+    /// * `i2c` - The I2C bus to use
+    /// * `address` - The I2C address of the device
+    ///
+    /// # Returns
+    /// A new IS31FL3733 driver
     pub fn new(i2c: BUS, address: u8) -> Self {
         Self {
             i2c: RefCell::new(i2c),
@@ -116,6 +123,12 @@ impl<BUS: embedded_hal::i2c::I2c> IS31FL3733<BUS> {
         }
     }
 
+    /// Initialize the device
+    ///
+    /// # Returns
+    /// * Ok(()) if the device was initialized successfully
+    /// * Err(IS31FL3733Error::DeviceError) if the device did not respond as expected
+    /// * Err(IS31FL3733Error::I2CError) if there was an I2C error
     pub fn initialize(&mut self) -> Result<(), IS31FL3733Error> {
         self.set_page(RESET_REGISTER.page)?;
         let reset_result = self.read_register(RESET_REGISTER.register)?;
@@ -129,6 +142,14 @@ impl<BUS: embedded_hal::i2c::I2c> IS31FL3733<BUS> {
         Ok(())
     }
 
+    /// Set the global current control
+    ///
+    /// # Arguments
+    /// * `gcc` - The global current control value
+    ///
+    /// # Returns
+    /// * Ok(()) if the global current control was set successfully
+    /// * Err(IS31FL3733Error::I2CError) if there was an I2C error
     pub fn set_global_current_control(&mut self, gcc: u8) -> Result<(), IS31FL3733Error> {
         if self.state.global_current_control != gcc {
             self.set_page(GCC_REGISTER.page)?;
@@ -138,6 +159,14 @@ impl<BUS: embedded_hal::i2c::I2c> IS31FL3733<BUS> {
         Ok(())
     }
 
+    /// Set the configuration register
+    ///
+    /// # Arguments
+    /// * `configuration` - The configuration register value
+    ///
+    /// # Returns
+    /// * Ok(()) if the configuration register was set successfully
+    /// * Err(IS31FL3733Error::I2CError) if there was an I2C error
     pub fn set_configuration(&mut self, configuration: u8) -> Result<(), IS31FL3733Error> {
         if self.state.configuration_register != configuration {
             self.set_page(CONFIGURATION_REGISTER.page)?;
@@ -147,12 +176,25 @@ impl<BUS: embedded_hal::i2c::I2c> IS31FL3733<BUS> {
         Ok(())
     }
 
-    pub fn unlock(&mut self) -> Result<(), IS31FL3733Error> {
+    /// Unlock the page register
+    ///
+    /// # Returns
+    /// * Ok(()) if the command register was unlocked successfully
+    /// * Err(IS31FL3733Error::I2CError) if there was an I2C error
+    fn unlock(&mut self) -> Result<(), IS31FL3733Error> {
         self.write_register(COMMAND_WRITE_LOCK_REGISTER, COMMAND_WRITE_UNLOCK)?;
         Ok(())
     }
 
-    pub fn set_page(&mut self, page: u8) -> Result<(), IS31FL3733Error> {
+    /// Set the page register, must be unlocked first using `unlock()`
+    ///
+    /// # Arguments
+    /// * `page` - The page to set
+    ///
+    /// # Returns
+    /// * Ok(()) if the page register was set successfully
+    /// * Err(IS31FL3733Error::I2CError) if there was an I2C error
+    fn set_page(&mut self, page: u8) -> Result<(), IS31FL3733Error> {
         if page != self.state.page {
             self.unlock()?;
             self.write_register(COMMAND_REGISTER, page)?;
@@ -162,6 +204,15 @@ impl<BUS: embedded_hal::i2c::I2c> IS31FL3733<BUS> {
         Ok(())
     }
 
+    /// Set the LEDs state on the device. Each bit in the array represents an LED.
+    /// Only the delta between the current state and the new state is written to the device.
+    ///
+    /// # Arguments
+    /// * `leds` - The new state of the LEDs
+    ///
+    /// # Returns
+    /// * Ok(()) if the LEDs were set successfully
+    /// * Err(IS31FL3733Error::I2CError) if there was an I2C error
     pub fn set_leds(&mut self, leds: &[u8; TOTAL_LED_COUNT / 8]) -> Result<(), IS31FL3733Error> {
         self.set_page(LED_CONTROL_REGISTER_BASE.page)?;
 
@@ -178,6 +229,16 @@ impl<BUS: embedded_hal::i2c::I2c> IS31FL3733<BUS> {
         Ok(())
     }
 
+    /// Set the brightness of the LEDs on the device.
+    /// Each byte in the array represents the brightness of a LED.
+    /// Only the delta between the current state and the new state is written to the device.
+    ///
+    /// # Arguments
+    /// * `brightness` - The new brightness of the LEDs
+    ///
+    /// # Returns
+    /// * Ok(()) if the brightness was set successfully
+    /// * Err(IS31FL3733Error::I2CError) if there was an I2C error
     pub fn set_brightness(
         &mut self,
         brightness: &[u8; TOTAL_LED_COUNT],
@@ -200,7 +261,7 @@ impl<BUS: embedded_hal::i2c::I2c> IS31FL3733<BUS> {
         Ok(())
     }
 
-    pub fn write_buffer<const N: usize>(
+    fn write_buffer<const N: usize>(
         &self,
         address: u8,
         data: &[u8],
@@ -225,7 +286,7 @@ impl<BUS: embedded_hal::i2c::I2c> IS31FL3733<BUS> {
         Ok(())
     }
 
-    pub fn write_register(&mut self, address: u8, value: u8) -> Result<(), IS31FL3733Error> {
+    fn write_register(&mut self, address: u8, value: u8) -> Result<(), IS31FL3733Error> {
         self.i2c
             .borrow_mut()
             .write(self.address, &[address, value])
@@ -233,7 +294,7 @@ impl<BUS: embedded_hal::i2c::I2c> IS31FL3733<BUS> {
         Ok(())
     }
 
-    pub fn read_register(&mut self, address: u8) -> Result<u8, IS31FL3733Error> {
+    fn read_register(&mut self, address: u8) -> Result<u8, IS31FL3733Error> {
         let mut buffer = [0; 1];
 
         self.i2c
