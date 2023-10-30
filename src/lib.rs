@@ -97,7 +97,10 @@ impl<BUS: embedded_hal::i2c::I2c> IS31FL3733<BUS> {
     /// # Returns
     /// * Ok(()) if the global current control was set successfully
     /// * Err(IS31FL3733Error::I2CError) if there was an I2C error
-    pub fn set_global_current_control(&mut self, gcc: u8) -> Result<(), IS31FL3733Error> {
+    pub fn set_global_current_control(
+        &mut self,
+        gcc: u8,
+    ) -> Result<(), IS31FL3733Error> {
         if self.state.global_current_control != gcc {
             self.set_page(GCC_REGISTER.page)?;
             self.write_register(GCC_REGISTER.register, gcc)?;
@@ -114,10 +117,16 @@ impl<BUS: embedded_hal::i2c::I2c> IS31FL3733<BUS> {
     /// # Returns
     /// * Ok(()) if the configuration register was set successfully
     /// * Err(IS31FL3733Error::I2CError) if there was an I2C error
-    pub fn set_configuration(&mut self, configuration: u8) -> Result<(), IS31FL3733Error> {
+    pub fn set_configuration(
+        &mut self,
+        configuration: u8,
+    ) -> Result<(), IS31FL3733Error> {
         if self.state.configuration_register != configuration {
             self.set_page(CONFIGURATION_REGISTER.page)?;
-            self.write_register(CONFIGURATION_REGISTER.register, configuration)?;
+            self.write_register(
+                CONFIGURATION_REGISTER.register,
+                configuration,
+            )?;
             self.state.configuration_register = configuration;
         }
         Ok(())
@@ -160,18 +169,22 @@ impl<BUS: embedded_hal::i2c::I2c> IS31FL3733<BUS> {
     /// # Returns
     /// * Ok(()) if the LEDs were set successfully
     /// * Err(IS31FL3733Error::I2CError) if there was an I2C error
-    pub fn set_leds(&mut self, leds: &[u8; TOTAL_LED_COUNT / 8]) -> Result<(), IS31FL3733Error> {
+    pub fn set_leds(
+        &mut self,
+        leds: &[u8; TOTAL_LED_COUNT / 8],
+    ) -> Result<(), IS31FL3733Error> {
         self.set_page(LED_CONTROL_REGISTER_BASE.page)?;
 
-        self.state
-            .leds
-            .try_diff_in_place(leds, |idx, data| -> Result<(), IS31FL3733Error> {
-                self.write_buffer::<{ (TOTAL_LED_COUNT / 8) + 1 }>(
+        self.state.leds.try_diff_in_place(
+            leds,
+            |idx, data| -> Result<(), IS31FL3733Error> {
+                self.write_buffer::<{ TOTAL_LED_COUNT / 8 }>(
                     LED_CONTROL_REGISTER_BASE.register + idx as u8,
                     data,
                 )?;
                 Ok(())
-            })?;
+            },
+        )?;
 
         Ok(())
     }
@@ -197,7 +210,7 @@ impl<BUS: embedded_hal::i2c::I2c> IS31FL3733<BUS> {
         self.state.brightness.try_diff_in_place(
             brightness,
             |idx, data| -> Result<(), IS31FL3733Error> {
-                self.write_buffer::<{ (TOTAL_LED_COUNT) + 1 }>(
+                self.write_buffer::<TOTAL_LED_COUNT>(
                     PWM_REGISTER_BASE.register + idx as u8,
                     data,
                 )?;
@@ -233,7 +246,11 @@ impl<BUS: embedded_hal::i2c::I2c> IS31FL3733<BUS> {
         Ok(())
     }
 
-    fn write_register(&mut self, address: u8, value: u8) -> Result<(), IS31FL3733Error> {
+    fn write_register(
+        &mut self,
+        address: u8,
+        value: u8,
+    ) -> Result<(), IS31FL3733Error> {
         self.i2c
             .borrow_mut()
             .write(self.address, &[address, value])
@@ -260,7 +277,9 @@ mod tests {
     use super::*;
     use test_utils::*;
 
-    impl<const N: usize, const M: usize> embedded_hal::i2c::I2c for FakeI2cBus<N, M> {
+    impl<const N: usize, const M: usize> embedded_hal::i2c::I2c
+        for FakeI2cBus<N, M>
+    {
         fn transaction(
             &mut self,
             _address: embedded_hal::i2c::SevenBitAddress,
@@ -287,10 +306,12 @@ mod tests {
 
     #[test]
     fn init_test() {
-        const EXPECTED_WRITE_DATA: [u8; 7] = [0xfe, 0xc5, 0xfd, 0x03, 0x11, 0x00, 0x01];
+        const EXPECTED_WRITE_DATA: [u8; 7] =
+            [0xfe, 0xc5, 0xfd, 0x03, 0x11, 0x00, 0x01];
         const EXPECTED_READ_DATA: [u8; 1] = [0];
 
-        let mut bus = FakeI2cBus::<32, 32>::new_with_read_data(&EXPECTED_READ_DATA);
+        let mut bus =
+            FakeI2cBus::<32, 32>::new_with_read_data(&EXPECTED_READ_DATA);
 
         let mut is31fl3733 = IS31FL3733::new(&mut bus, 0x60);
         is31fl3733.initialize().unwrap();
@@ -300,7 +321,8 @@ mod tests {
 
     #[test]
     fn configuration_test() {
-        const EXPECTED_WRITE_DATA: &[u8] = &[0xfe, 0xc5, 0xfd, 0x03, 0x00, 0xaa, 0x00, 0xab];
+        const EXPECTED_WRITE_DATA: &[u8] =
+            &[0xfe, 0xc5, 0xfd, 0x03, 0x00, 0xaa, 0x00, 0xab];
 
         let mut bus = FakeI2cBus::<32, 32>::new();
 
@@ -314,7 +336,8 @@ mod tests {
 
     #[test]
     fn global_current_control_test() {
-        const EXPECTED_WRITE_DATA: &[u8] = &[0xfe, 0xc5, 0xfd, 0x03, 0x01, 0xaa, 0x01, 0xab];
+        const EXPECTED_WRITE_DATA: &[u8] =
+            &[0xfe, 0xc5, 0xfd, 0x03, 0x01, 0xaa, 0x01, 0xab];
 
         let mut bus = FakeI2cBus::<32, 32>::new();
 
