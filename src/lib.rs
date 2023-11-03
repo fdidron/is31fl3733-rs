@@ -1,5 +1,4 @@
 #![no_std]
-use core::cell::RefCell;
 use diff_in_place::DiffInPlace;
 use embedded_hal::i2c::{Error, ErrorKind, ErrorType};
 
@@ -28,7 +27,7 @@ impl<BUS: embedded_hal::i2c::I2c> ErrorType for IS31FL3733<BUS> {
 }
 
 pub struct IS31FL3733<BUS: embedded_hal::i2c::I2c> {
-    i2c: RefCell<BUS>,
+    i2c: BUS,
     state: State,
     address: u8,
 }
@@ -64,7 +63,7 @@ impl<BUS: embedded_hal::i2c::I2c> IS31FL3733<BUS> {
     /// A new IS31FL3733 driver
     pub fn new(i2c: BUS, address: u8) -> Self {
         Self {
-            i2c: RefCell::new(i2c),
+            i2c,
             address,
             state: State::default(),
         }
@@ -160,28 +159,73 @@ impl<BUS: embedded_hal::i2c::I2c> IS31FL3733<BUS> {
         Ok(())
     }
 
-    /// Set the LEDs state on the device. Each bit in the array represents an LED.
+    /// Set the LEDs state on the device. Each bit in the array represents a LED.
     /// Only the delta between the current state and the new state is written to the device.
     ///
     /// # Arguments
     /// * `leds` - The new state of the LEDs
     ///
-    /// # Returns
+
     /// * Ok(()) if the LEDs were set successfully
     /// * Err(IS31FL3733Error::I2CError) if there was an I2C error
-    pub fn set_leds(
+    pub fn update_leds(
         &mut self,
         leds: &[u8; TOTAL_LED_COUNT / 8],
     ) -> Result<(), IS31FL3733Error> {
-        self.set_page(LED_CONTROL_REGISTER_BASE.page)?;
+        let current = self.state.leds;
 
-        self.state.leds.try_diff_in_place(
+        current.try_diff_in_place(
             leds,
-            |idx, data| -> Result<(), IS31FL3733Error> {
-                self.write_buffer::<{ TOTAL_LED_COUNT / 8 }>(
-                    LED_CONTROL_REGISTER_BASE.register + idx as u8,
-                    data,
-                )?;
+            |index, leds| -> Result<(), IS31FL3733Error> {
+                self.write_leds(index, leds)?;
+                Ok(())
+            },
+        )?;
+        Ok(())
+    }
+    /// Sets the state of the LEDs on the device, starting from a
+    /// specific index.
+    ///
+    /// # Arguments
+    /// * `index` - The index of the first LED array to update
+    /// * `leds` - The new brightness of the LEDs, one bit per LED
+    ///
+    /// # Returns
+    /// * Ok(()) if the brightness was set successfully
+    /// * Err(IS31FL3733Error::I2CError) if there was an I2C error
+    pub fn write_leds(
+        &mut self,
+        index: usize,
+        leds: &[u8],
+    ) -> Result<(), IS31FL3733Error> {
+        self.set_page(LED_CONTROL_REGISTER_BASE.page)?;
+        self.write_buffer::<{ (TOTAL_LED_COUNT / 8) + 1 }>(
+            LED_CONTROL_REGISTER_BASE.register + index as u8,
+            leds,
+        )?;
+
+        self.state.leds[index..index + leds.len()].copy_from_slice(leds);
+        Ok(())
+    }
+
+    /// Set the LEDs brightness on the device. Each byte in the array represents a LED.
+    /// Only the delta between the current state and the new state is written to the device.
+    ///
+    /// # Arguments
+    /// * `brightness` - The new state of the LEDs
+    ///
+    /// * Ok(()) if the LEDs were set successfully
+    /// * Err(IS31FL3733Error::I2CError) if there was an I2C error
+    pub fn update_brightness(
+        &mut self,
+        brightness: &[u8; TOTAL_LED_COUNT],
+    ) -> Result<(), IS31FL3733Error> {
+        let current = self.state.brightness;
+
+        current.try_diff_in_place(
+            brightness,
+            |index, brightness| -> Result<(), IS31FL3733Error> {
+                self.write_brightness(index, brightness)?;
                 Ok(())
             },
         )?;
@@ -189,40 +233,36 @@ impl<BUS: embedded_hal::i2c::I2c> IS31FL3733<BUS> {
         Ok(())
     }
 
-    /// Set the brightness of the LEDs on the device.
-    /// Each byte in the array represents the brightness of a LED.
-    /// Only the delta between the current state and the new state is written to the device.
+    /// Sets the brightness of the LEDs on the device, starting from a
+    /// specific index.
     ///
     /// # Arguments
-    /// * `brightness` - The new brightness of the LEDs
+    /// * `index` - The index of the first LED to update
+    /// * `brightness` - The new brightness of the LEDs, one byte per LED
     ///
     /// # Returns
     /// * Ok(()) if the brightness was set successfully
     /// * Err(IS31FL3733Error::I2CError) if there was an I2C error
-    pub fn set_brightness(
+    pub fn write_brightness(
         &mut self,
-        brightness: &[u8; TOTAL_LED_COUNT],
+        index: usize,
+        brightness: &[u8],
     ) -> Result<(), IS31FL3733Error> {
         self.set_page(PWM_REGISTER_BASE.page)?;
 
-        // TODO - is is possible to avoid this copy?
-        // perhaps with lifetime annotations?
-        self.state.brightness.try_diff_in_place(
+        self.write_buffer::<{ TOTAL_LED_COUNT + 1 }>(
+            PWM_REGISTER_BASE.register + index as u8,
             brightness,
-            |idx, data| -> Result<(), IS31FL3733Error> {
-                self.write_buffer::<TOTAL_LED_COUNT>(
-                    PWM_REGISTER_BASE.register + idx as u8,
-                    data,
-                )?;
-                Ok(())
-            },
         )?;
+
+        self.state.brightness[index..index + brightness.len()]
+            .copy_from_slice(brightness);
 
         Ok(())
     }
 
     fn write_buffer<const N: usize>(
-        &self,
+        &mut self,
         address: u8,
         data: &[u8],
     ) -> Result<(), IS31FL3733Error> {
@@ -239,7 +279,6 @@ impl<BUS: embedded_hal::i2c::I2c> IS31FL3733<BUS> {
             .map_err(|_| IS31FL3733Error::OutOfSpaceError)?;
 
         self.i2c
-            .borrow_mut()
             .write(self.address, buffer.as_slice())
             .map_err(|e| IS31FL3733Error::I2CError(e.kind()))?;
 
@@ -252,7 +291,6 @@ impl<BUS: embedded_hal::i2c::I2c> IS31FL3733<BUS> {
         value: u8,
     ) -> Result<(), IS31FL3733Error> {
         self.i2c
-            .borrow_mut()
             .write(self.address, &[address, value])
             .map_err(|e| IS31FL3733Error::I2CError(e.kind()))?;
         Ok(())
@@ -262,7 +300,6 @@ impl<BUS: embedded_hal::i2c::I2c> IS31FL3733<BUS> {
         let mut buffer = [0; 1];
 
         self.i2c
-            .borrow_mut()
             .write_read(self.address, &[address], &mut buffer)
             .map_err(|e| IS31FL3733Error::I2CError(e.kind()))?;
         Ok(buffer[0])
@@ -372,13 +409,13 @@ mod tests {
         new_brightness[20..22].fill(0xff);
         new_brightness[188..].fill(0xf0);
 
-        is31fl3733.set_brightness(&new_brightness).unwrap();
+        is31fl3733.update_brightness(&new_brightness).unwrap();
 
         let mut new_leds = [0; 24];
 
         new_leds[10..12].fill(0xff);
 
-        is31fl3733.set_leds(&new_leds).unwrap();
+        is31fl3733.update_leds(&new_leds).unwrap();
 
         assert_eq!(bus.write_data_as_ref(), EXPECTED_WRITE_DATA);
     }
