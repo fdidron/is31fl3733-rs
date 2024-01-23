@@ -16,6 +16,12 @@ pub struct IS31FL3733<DEVICE: RawDevice> {
     state: State,
 }
 
+#[derive(Copy, Clone)]
+enum DiffState {
+    Same,
+    Different(usize),
+}
+
 impl<DEVICE: RawDevice> IS31FL3733<DEVICE> {
     /// Create a new IS31FL3733 driver
     /// # Arguments
@@ -36,18 +42,20 @@ impl<DEVICE: RawDevice> IS31FL3733<DEVICE> {
     /// # Returns
     /// * Ok(()) if the device was initialized successfully
     /// * Err(IS31FL3733Error::DeviceError) if the device did not respond as expected
-    pub fn initialize(&mut self) -> Result<(), IS31FL3733Error> {
-        self.set_page(RESET_REGISTER.page)?;
+    pub async fn initialize(&mut self) -> Result<(), IS31FL3733Error> {
+        self.set_page(RESET_REGISTER.page).await?;
         let reset_result = self
             .device
             .read_register(RESET_REGISTER.register)
+            .await
             .map_err(|_| IS31FL3733Error::DeviceError)?;
 
         if reset_result != 0x00 {
             return Err(IS31FL3733Error::DeviceError);
         }
-        self.set_configuration(CONFIGURATION_SOFTWARE_SHUTDOWN_DISABLE)?;
-        self.set_page(self.state.page)?;
+        self.set_configuration(CONFIGURATION_SOFTWARE_SHUTDOWN_DISABLE)
+            .await?;
+        self.set_page(self.state.page).await?;
 
         Ok(())
     }
@@ -59,14 +67,15 @@ impl<DEVICE: RawDevice> IS31FL3733<DEVICE> {
     ///
     /// # Returns
     /// * Ok(()) if the global current control was set successfully
-    pub fn set_global_current_control(
+    pub async fn set_global_current_control(
         &mut self,
         gcc: u8,
     ) -> Result<(), IS31FL3733Error> {
         if self.state.global_current_control != gcc {
-            self.set_page(GCC_REGISTER.page)?;
+            self.set_page(GCC_REGISTER.page).await?;
             self.device
                 .write_register(GCC_REGISTER.register, gcc)
+                .await
                 .map_err(|_| IS31FL3733Error::DeviceError)?;
             self.state.global_current_control = gcc;
         }
@@ -80,14 +89,15 @@ impl<DEVICE: RawDevice> IS31FL3733<DEVICE> {
     ///
     /// # Returns
     /// * Ok(()) if the configuration register was set successfully
-    pub fn set_configuration(
+    pub async fn set_configuration(
         &mut self,
         configuration: u8,
     ) -> Result<(), IS31FL3733Error> {
         if self.state.configuration_register != configuration {
-            self.set_page(CONFIGURATION_REGISTER.page)?;
+            self.set_page(CONFIGURATION_REGISTER.page).await?;
             self.device
                 .write_register(CONFIGURATION_REGISTER.register, configuration)
+                .await
                 .map_err(|_| IS31FL3733Error::DeviceError)?;
             self.state.configuration_register = configuration;
         }
@@ -98,9 +108,10 @@ impl<DEVICE: RawDevice> IS31FL3733<DEVICE> {
     ///
     /// # Returns
     /// * Ok(()) if the command register was unlocked successfully
-    fn unlock(&mut self) -> Result<(), IS31FL3733Error> {
+    async fn unlock(&mut self) -> Result<(), IS31FL3733Error> {
         self.device
             .write_register(COMMAND_WRITE_LOCK_REGISTER, COMMAND_WRITE_UNLOCK)
+            .await
             .map_err(|_| IS31FL3733Error::DeviceError)?;
         Ok(())
     }
@@ -112,11 +123,12 @@ impl<DEVICE: RawDevice> IS31FL3733<DEVICE> {
     ///
     /// # Returns
     /// * Ok(()) if the page register was set successfully
-    fn set_page(&mut self, page: u8) -> Result<(), IS31FL3733Error> {
+    async fn set_page(&mut self, page: u8) -> Result<(), IS31FL3733Error> {
         if page != self.state.page {
-            self.unlock()?;
+            self.unlock().await?;
             self.device
                 .write_register(COMMAND_REGISTER, page)
+                .await
                 .map_err(|_| IS31FL3733Error::DeviceError)?;
 
             self.state.page = page;
@@ -132,19 +144,43 @@ impl<DEVICE: RawDevice> IS31FL3733<DEVICE> {
     ///
 
     /// * Ok(()) if the LEDs were set successfully
-    pub fn update_leds(
+    pub async fn update_leds(
         &mut self,
         leds: &[u8; TOTAL_LED_COUNT / 8],
     ) -> Result<(), IS31FL3733Error> {
         let current = self.state.leds;
 
-        current.try_diff_in_place(
-            leds,
-            |index, leds| -> Result<(), IS31FL3733Error> {
-                self.write_leds(index, leds)?;
-                Ok(())
-            },
-        )?;
+        // current.try_diff_in_place(
+        //     leds,
+        //     |index, leds| -> Result<(), IS31FL3733Error> {
+        //         self.write_leds(index, leds).await?;
+        //         Ok(())
+        //     },
+        // )?;
+        let byte_for_byte = current.iter().zip(leds.iter());
+        let mut run_state = DiffState::Same;
+        for (current, (left, right)) in byte_for_byte.enumerate() {
+            match (run_state, left == right) {
+                (DiffState::Same, false) => {
+                    // We are starting an unequal run, preserve the current index
+                    run_state = DiffState::Different(current);
+                }
+                (DiffState::Different(run_start), true) => {
+                    // We are ending an unequal run, call the diff function
+                    self.write_leds(run_start, &leds[run_start..current])
+                        .await?;
+                    run_state = DiffState::Same;
+                }
+                _ => {
+                    // Run state is unchanged
+                }
+            }
+        }
+
+        // If we are still in a different run, call the diff function
+        if let DiffState::Different(run_start) = run_state {
+            self.write_leds(run_start, &leds[run_start..]).await?;
+        }
         Ok(())
     }
     /// Sets the state of the LEDs on the device, starting from a
@@ -156,16 +192,17 @@ impl<DEVICE: RawDevice> IS31FL3733<DEVICE> {
     ///
     /// # Returns
     /// * Ok(()) if the brightness was set successfully
-    pub fn write_leds(
+    pub async fn write_leds(
         &mut self,
         index: usize,
         leds: &[u8],
     ) -> Result<(), IS31FL3733Error> {
         core::assert!(index + leds.len() <= TOTAL_LED_COUNT / 8);
 
-        self.set_page(LED_CONTROL_REGISTER_BASE.page)?;
+        self.set_page(LED_CONTROL_REGISTER_BASE.page).await?;
         self.device
             .write(LED_CONTROL_REGISTER_BASE.register + index as u8, leds)
+            .await
             .map_err(|_| IS31FL3733Error::DeviceError)?;
 
         self.state.leds[index..index + leds.len()].copy_from_slice(leds);
@@ -179,19 +216,40 @@ impl<DEVICE: RawDevice> IS31FL3733<DEVICE> {
     /// * `brightness` - The new state of the LEDs
     ///
     /// * Ok(()) if the LEDs were set successfully
-    pub fn update_brightness(
+    pub async fn update_brightness(
         &mut self,
         brightness: &[u8; TOTAL_LED_COUNT],
     ) -> Result<(), IS31FL3733Error> {
         let current = self.state.brightness;
 
-        current.try_diff_in_place(
-            brightness,
-            |index, brightness| -> Result<(), IS31FL3733Error> {
-                self.write_brightness(index, brightness)?;
-                Ok(())
-            },
-        )?;
+        let byte_for_byte = current.iter().zip(brightness.iter());
+        let mut run_state = DiffState::Same;
+        for (current, (left, right)) in byte_for_byte.enumerate() {
+            match (run_state, left == right) {
+                (DiffState::Same, false) => {
+                    // We are starting an unequal run, preserve the current index
+                    run_state = DiffState::Different(current);
+                }
+                (DiffState::Different(run_start), true) => {
+                    // We are ending an unequal run, call the diff function
+                    self.write_brightness(
+                        run_start,
+                        &brightness[run_start..current],
+                    )
+                    .await?;
+                    run_state = DiffState::Same;
+                }
+                _ => {
+                    // Run state is unchanged
+                }
+            }
+        }
+
+        // If we are still in a different run, call the diff function
+        if let DiffState::Different(run_start) = run_state {
+            self.write_brightness(run_start, &brightness[run_start..])
+                .await?;
+        }
 
         Ok(())
     }
@@ -205,17 +263,18 @@ impl<DEVICE: RawDevice> IS31FL3733<DEVICE> {
     ///
     /// # Returns
     /// * Ok(()) if the brightness was set successfully
-    pub fn write_brightness(
+    pub async fn write_brightness(
         &mut self,
         index: usize,
         brightness: &[u8],
     ) -> Result<(), IS31FL3733Error> {
         core::assert!(index + brightness.len() <= TOTAL_LED_COUNT);
 
-        self.set_page(PWM_REGISTER_BASE.page)?;
+        self.set_page(PWM_REGISTER_BASE.page).await?;
 
         self.device
             .write(PWM_REGISTER_BASE.register + index as u8, brightness)
+            .await
             .map_err(|_| IS31FL3733Error::DeviceError)?;
 
         self.state.brightness[index..index + brightness.len()]
@@ -231,22 +290,24 @@ mod tests {
     use crate::i2c::I2cAdapter;
     use crate::test_utils::*;
 
-    impl<const N: usize, const M: usize> embedded_hal::i2c::I2c
+    use lite_async_test::async_test;
+
+    impl<const N: usize, const M: usize> embedded_hal_async::i2c::I2c
         for FakeI2cBus<N, M>
     {
-        fn transaction(
+        async fn transaction(
             &mut self,
-            _address: embedded_hal::i2c::SevenBitAddress,
-            operations: &mut [embedded_hal::i2c::Operation],
+            _address: embedded_hal_async::i2c::SevenBitAddress,
+            operations: &mut [embedded_hal_async::i2c::Operation<'_>],
         ) -> Result<(), Self::Error> {
             for operation in operations {
                 match operation {
-                    embedded_hal::i2c::Operation::Write(write) => {
+                    embedded_hal_async::i2c::Operation::Write(write) => {
                         self.write_data
                             .extend_from_slice(write)
                             .map_err(|_| FakeI2cError::Error)?;
                     }
-                    embedded_hal::i2c::Operation::Read(read) => {
+                    embedded_hal_async::i2c::Operation::Read(read) => {
                         // Copy read.len() bytes from read_data to read and remove those bytes
                         for i in 0..read.len() {
                             read[i] = self.read_data.remove(i);
@@ -258,8 +319,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn init_test() {
+    #[async_test]
+    async fn init_test() {
         const EXPECTED_WRITE_DATA: [u8; 7] =
             [0xfe, 0xc5, 0xfd, 0x03, 0x11, 0x00, 0x01];
         const EXPECTED_READ_DATA: [u8; 1] = [0];
@@ -269,7 +330,7 @@ mod tests {
         let mut adapter = I2cAdapter::new(bus, 0x60);
 
         let mut is31fl3733 = IS31FL3733::new(&mut adapter);
-        is31fl3733.initialize().unwrap();
+        is31fl3733.initialize().await.unwrap();
 
         assert_eq!(
             adapter.into_inner().write_data_as_ref(),
@@ -277,8 +338,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn configuration_test() {
+    #[async_test]
+    async fn configuration_test() {
         const EXPECTED_WRITE_DATA: &[u8] =
             &[0xfe, 0xc5, 0xfd, 0x03, 0x00, 0xaa, 0x00, 0xab];
 
@@ -288,9 +349,9 @@ mod tests {
 
         let mut is31fl3733 = IS31FL3733::new(&mut adapter);
 
-        is31fl3733.set_configuration(0xaa).unwrap();
-        is31fl3733.set_configuration(0xaa).unwrap();
-        is31fl3733.set_configuration(0xab).unwrap();
+        is31fl3733.set_configuration(0xaa).await.unwrap();
+        is31fl3733.set_configuration(0xaa).await.unwrap();
+        is31fl3733.set_configuration(0xab).await.unwrap();
 
         assert_eq!(
             adapter.into_inner().write_data_as_ref(),
@@ -298,8 +359,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn global_current_control_test() {
+    #[async_test]
+    async fn global_current_control_test() {
         const EXPECTED_WRITE_DATA: &[u8] =
             &[0xfe, 0xc5, 0xfd, 0x03, 0x01, 0xaa, 0x01, 0xab];
 
@@ -309,9 +370,9 @@ mod tests {
 
         let mut is31fl3733 = IS31FL3733::new(&mut adapter);
 
-        is31fl3733.set_global_current_control(0xaa).unwrap();
-        is31fl3733.set_global_current_control(0xaa).unwrap();
-        is31fl3733.set_global_current_control(0xab).unwrap();
+        is31fl3733.set_global_current_control(0xaa).await.unwrap();
+        is31fl3733.set_global_current_control(0xaa).await.unwrap();
+        is31fl3733.set_global_current_control(0xab).await.unwrap();
 
         assert_eq!(
             adapter.into_inner().write_data_as_ref(),
@@ -319,8 +380,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn state_update_test() {
+    #[async_test]
+    async fn state_update_test() {
         #[rustfmt::skip]
         const EXPECTED_WRITE_DATA: &[u8] = &[
             254, 197,  // Write unlock
@@ -343,13 +404,13 @@ mod tests {
         new_brightness[20..22].fill(0xff);
         new_brightness[188..].fill(0xf0);
 
-        is31fl3733.update_brightness(&new_brightness).unwrap();
+        is31fl3733.update_brightness(&new_brightness).await.unwrap();
 
         let mut new_leds = [0; 24];
 
         new_leds[10..12].fill(0xff);
 
-        is31fl3733.update_leds(&new_leds).unwrap();
+        is31fl3733.update_leds(&new_leds).await.unwrap();
 
         assert_eq!(
             adapter.into_inner().write_data_as_ref(),

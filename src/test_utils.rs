@@ -1,4 +1,4 @@
-use embedded_hal::i2c::{Error, ErrorKind, ErrorType};
+use embedded_hal_async::i2c::{Error, ErrorKind, ErrorType};
 
 #[derive(Debug)]
 pub enum FakeI2cError {

@@ -1,25 +1,32 @@
 pub trait RawDevice {
     type Error;
 
-    fn write(&mut self, address: u8, data: &[u8]) -> Result<(), Self::Error>;
+    async fn write(
+        &mut self,
+        address: u8,
+        data: &[u8],
+    ) -> Result<(), Self::Error>;
 
-    fn read(&mut self, address: u8, data: &mut [u8])
-        -> Result<(), Self::Error>;
+    async fn read(
+        &mut self,
+        address: u8,
+        data: &mut [u8],
+    ) -> Result<(), Self::Error>;
 
-    fn write_register(
+    async fn write_register(
         &mut self,
         address: u8,
         value: u8,
     ) -> Result<(), Self::Error> {
-        self.write(address, &[value])?;
+        self.write(address, &[value]).await?;
 
         Ok(())
     }
 
-    fn read_register(&mut self, address: u8) -> Result<u8, Self::Error> {
+    async fn read_register(&mut self, address: u8) -> Result<u8, Self::Error> {
         let mut buffer = [0; 1];
 
-        self.read(address, &mut buffer)?;
+        self.read(address, &mut buffer).await?;
 
         Ok(buffer[0])
     }
@@ -31,15 +38,19 @@ where
 {
     type Error = T::Error;
 
-    fn write(&mut self, address: u8, data: &[u8]) -> Result<(), Self::Error> {
-        T::write(self, address, data)
+    async fn write(
+        &mut self,
+        address: u8,
+        data: &[u8],
+    ) -> Result<(), Self::Error> {
+        T::write(self, address, data).await
     }
 
-    fn read(
+    async fn read(
         &mut self,
         address: u8,
         data: &mut [u8],
     ) -> Result<(), Self::Error> {
-        T::read(self, address, data)
+        T::read(self, address, data).await
     }
 }

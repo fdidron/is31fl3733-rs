@@ -1,7 +1,7 @@
 use crate::device::RawDevice;
 use crate::is31fl3733::IS31FL3733;
 
-use embedded_hal::i2c::I2c;
+use embedded_hal_async::i2c::I2c;
 
 impl<BUS: I2c> IS31FL3733<I2cAdapter<BUS>> {
     /// Create a new IS31FL3733 driver
@@ -35,26 +35,38 @@ impl<BUS: I2c> I2cAdapter<BUS> {
 impl<BUS: I2c> RawDevice for I2cAdapter<BUS> {
     type Error = BUS::Error;
 
-    fn write(&mut self, address: u8, data: &[u8]) -> Result<(), BUS::Error> {
-        self.i2c.transaction(
-            self.address,
-            &mut [
-                embedded_hal::i2c::Operation::Write(&[address]),
-                embedded_hal::i2c::Operation::Write(data),
-            ],
-        )?;
+    async fn write(
+        &mut self,
+        address: u8,
+        data: &[u8],
+    ) -> Result<(), BUS::Error> {
+        self.i2c
+            .transaction(
+                self.address,
+                &mut [
+                    embedded_hal_async::i2c::Operation::Write(&[address]),
+                    embedded_hal_async::i2c::Operation::Write(data),
+                ],
+            )
+            .await?;
 
         Ok(())
     }
 
-    fn read(&mut self, address: u8, data: &mut [u8]) -> Result<(), BUS::Error> {
-        self.i2c.transaction(
-            self.address,
-            &mut [
-                embedded_hal::i2c::Operation::Write(&[address]),
-                embedded_hal::i2c::Operation::Read(data),
-            ],
-        )?;
+    async fn read(
+        &mut self,
+        address: u8,
+        data: &mut [u8],
+    ) -> Result<(), BUS::Error> {
+        self.i2c
+            .transaction(
+                self.address,
+                &mut [
+                    embedded_hal_async::i2c::Operation::Write(&[address]),
+                    embedded_hal_async::i2c::Operation::Read(data),
+                ],
+            )
+            .await?;
 
         Ok(())
     }
