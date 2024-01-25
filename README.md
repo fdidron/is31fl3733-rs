@@ -30,7 +30,6 @@ is31fl3733.set_brightness(&brightness);
 ```
 
 # TBD
-* async (default)/blocking variants suitable for embassy-rs
 * LED open/short state detection
 * Interrupt support
 * Auto breathing mode
