@@ -27,10 +27,35 @@ pub struct IS31FL3733<BUS, M: Mode> {
     _phantom: core::marker::PhantomData<M>,
 }
 
-#[derive(Copy, Clone)]
-enum DiffState {
-    Same,
-    Different(usize),
+// General implementation
+impl<BUS, M: Mode> IS31FL3733<BUS, M> {
+    /// Create a new IS31FL3733 driver
+    /// # Arguments
+    /// * `i2c` - The I2C bus to use
+    /// * `address` - The I2C address of the device
+    ///
+    /// # Returns
+    /// A new IS31FL3733 driver
+    pub fn new(bus: BUS, address: u8) -> Self {
+        Self {
+            bus,
+            address,
+            state: State::default(),
+            _phantom: core::marker::PhantomData,
+        }
+    }
+
+    pub fn into_inner(self) -> BUS {
+        self.bus
+    }
+
+    pub fn inner(&self) -> &BUS {
+        &self.bus
+    }
+
+    pub fn inner_mut(&mut self) -> &mut BUS {
+        &mut self.bus
+    }
 }
 
 impl<BUS: embedded_hal::i2c::I2c> IS31FL3733<BUS, Blocking> {
@@ -269,15 +294,8 @@ impl<BUS: embedded_hal::i2c::I2c> IS31FL3733<BUS, Blocking> {
     }
 }
 
-impl<BUS, M: Mode> IS31FL3733<BUS, M> {
-    /// Create a new IS31FL3733 driver
-    /// # Arguments
-    /// * `i2c` - The I2C bus to use
-    /// * `address` - The I2C address of the device
-    ///
-    /// # Returns
-    /// A new IS31FL3733 driver
-    pub fn new(bus: BUS, address: u8) -> Self {
+impl<BUS: embedded_hal_async::i2c::I2c> IS31FL3733<BUS, Async> {
+    pub fn new_async(bus: BUS, address: u8) -> Self {
         Self {
             bus,
             address,
@@ -286,20 +304,6 @@ impl<BUS, M: Mode> IS31FL3733<BUS, M> {
         }
     }
 
-    pub fn into_inner(self) -> BUS {
-        self.bus
-    }
-
-    pub fn inner(&self) -> &BUS {
-        &self.bus
-    }
-
-    pub fn inner_mut(&mut self) -> &mut BUS {
-        &mut self.bus
-    }
-}
-
-impl<BUS: embedded_hal_async::i2c::I2c> IS31FL3733<BUS, Async> {
     async fn write(
         &mut self,
         address: u8,
@@ -450,21 +454,16 @@ impl<BUS: embedded_hal_async::i2c::I2c> IS31FL3733<BUS, Async> {
     /// # Arguments
     /// * `leds` - The new state of the LEDs
     ///
-
+    /// # Returns
     /// * Ok(()) if the LEDs were set successfully
     pub async fn update_leds(
         &mut self,
         leds: &[u8; TOTAL_LED_COUNT / 8],
     ) -> Result<(), IS31FL3733Error> {
+        // note: I couldn't figure out a way to make diff_in_place work with async without having
+        // to use boxed futures, which is not no_std compatible, so I'm reluctantly inlining here
         let current = self.state.leds;
 
-        // current.try_diff_in_place(
-        //     leds,
-        //     |index, leds| -> Result<(), IS31FL3733Error> {
-        //         self.write_leds(index, leds).await?;
-        //         Ok(())
-        //     },
-        // )?;
         let byte_for_byte = current.iter().zip(leds.iter());
         let mut run_state = DiffState::Same;
         for (current, (left, right)) in byte_for_byte.enumerate() {
@@ -588,6 +587,12 @@ impl<BUS: embedded_hal_async::i2c::I2c> IS31FL3733<BUS, Async> {
 
         Ok(())
     }
+}
+
+#[derive(Copy, Clone)]
+enum DiffState {
+    Same,
+    Different(usize),
 }
 
 #[cfg(test)]
