@@ -14,8 +14,8 @@ impl Default for State {
         Self {
             page: 0,
             configuration_register: 0,
-            leds: [0; 24],
-            brightness: [0; 192],
+            leds: [0; 8],
+            brightness: [0; 64],
             global_current_control: 0,
         }
     }
